@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-16
 
-**Status:** Approved in conversation; awaiting final document review
+**Status:** Revised after adversarial review; awaiting final document approval
 
 **Target:** Windows 11 x64
 
@@ -28,8 +28,18 @@ The product solves a narrow problem: frequently reused text should not disappear
 
 - **Persistent:** snippets are stored independently of the clipboard.
 - **Fast:** opening, searching, selecting, and copying are keyboard-first.
-- **Unobtrusive:** the quick panel appears near the pointer and returns focus to the previous application.
+- **Unobtrusive:** the quick panel appears near the pointer and requests focus restoration to the previous application without synthesizing input.
 - **Local:** the MVP has no account, cloud sync, telemetry, or network dependency.
+
+### 1.4 Product success criteria
+
+The MVP succeeds only when a user can complete this loop reliably:
+
+```text
+Save a snippet → invoke TextCaddy → find and select it → copy it → return to the destination
+```
+
+Infrastructure that does not exercise this loop is scaffolding, not a product milestone.
 
 ## 2. Scope
 
@@ -44,6 +54,7 @@ The product solves a narrow problem: frequently reused text should not disappear
 - Copy-and-close and copy-and-stay-open commands.
 - A separate management window for snippet, group, and settings maintenance.
 - Sensitive-item masking and Windows DPAPI protection for sensitive bodies.
+- Clipboard-history and cross-device-roaming exclusion for sensitive content.
 - Conditional timed clearing of clipboard content written from sensitive items.
 - Local SQLite persistence, migration, and bounded backups.
 
@@ -82,11 +93,13 @@ The system tray exposes commands to open the management window, open the quick p
 2. TextCaddy records the foreground window that should receive focus later.
 3. The panel is placed near the pointer on the pointer's current monitor.
 4. Placement is clamped to the monitor work area and calculated using the monitor's DPI.
-5. The search box receives keyboard focus.
-6. The user searches, navigates, and selects snippets.
+5. The panel opens in selection mode with the first result highlighted.
+6. The user optionally enters search mode, filters the list, returns to selection mode, and selects snippets.
 7. Copy-and-close returns focus to the recorded window; cancellation changes neither the clipboard nor stored data.
 
 The provisional default shortcut is `Ctrl+Alt+Space`. `Alt+Space` is not used because Windows reserves it for the window system menu. Users can change the shortcut in settings.
+
+Hotkey registration uses the Windows `MOD_NOREPEAT` flag. When a user changes the shortcut, TextCaddy registers the candidate shortcut before unregistering the working shortcut. A conflict therefore cannot leave the application without a valid hotkey unless no hotkey has ever been registered.
 
 ### 4.3 Closing and cancellation
 
@@ -97,12 +110,18 @@ The provisional default shortcut is `Ctrl+Alt+Space`. `Alt+Space` is not used be
 
 ### 4.4 Search, navigation, and paging
 
+- The panel has two visibly indicated input states: **selection mode** and **search mode**.
+- It opens in selection mode so plain digits can select entries immediately.
+- `/` or `Ctrl+F` enters search mode and focuses the search field.
+- In search mode, all text input, including digits and IME composition, edits the query. Left and right arrows retain their normal text-caret behavior.
+- `Enter` accepts the current query and returns to selection mode. `Esc` always closes the panel; it does not silently change modes.
 - With no query, the panel shows the active group's ordered snippets.
-- A query matches snippet titles and bodies without case sensitivity.
-- Up and down arrows move the highlighted item.
-- Left and right arrows change pages.
+- A query matches ordinary snippet titles and bodies without case sensitivity.
+- Sensitive snippets are matched by title only; their protected bodies are not decrypted for incremental search.
+- Up and down arrows move the highlighted result in either mode.
+- `PageUp` and `PageDown` change pages without conflicting with text editing.
 - Each page contains at most ten items.
-- Digits `1` through `9` address items one through nine; `0` addresses item ten.
+- In selection mode, digits `1` through `9` address items one through nine and `0` addresses item ten.
 - Search state lives only for the current panel session.
 
 ### 4.5 Selection model
@@ -112,6 +131,8 @@ The provisional default shortcut is `Ctrl+Alt+Space`. `Alt+Space` is not used be
 - Deselecting an item removes it from the selection sequence.
 - Selecting it again appends it to the end of the sequence.
 - Selected items remain selected if a later query or page change makes them temporarily invisible.
+- A persistent selection summary shows the count, ordered titles, and sensitive-item markers for all selected items, including invisible ones.
+- `Ctrl+Backspace` clears the complete selection without closing the panel.
 - Closing the panel clears the selection session.
 
 ### 4.6 Copy behavior
@@ -128,12 +149,33 @@ The provisional default shortcut is `Ctrl+Alt+Space`. `Alt+Space` is not used be
 
 When the composed result contains at least one sensitive snippet:
 
-1. TextCaddy records a fingerprint of the exact clipboard value it wrote.
-2. A configurable timer starts; the default is 30 seconds.
-3. At expiry, TextCaddy reads the current clipboard value.
-4. It clears the clipboard only if the value still matches the recorded fingerprint.
+1. TextCaddy writes the value with Windows clipboard options that set `IsAllowedInHistory` and `IsRoamable` to `false`.
+2. After a successful write, TextCaddy records the Windows clipboard sequence number rather than hashing or retaining the copied secret.
+3. A configurable timer starts; the default is 30 seconds.
+4. At expiry, TextCaddy clears the clipboard only if its sequence number is unchanged.
 
-This prevents the cleanup task from deleting newer content copied by the user.
+Sequence comparison prevents the cleanup task from deleting newer content, including a later copy whose text happens to be identical. Excluding history and roaming reduces Windows-managed persistence, but TextCaddy cannot prevent another process running as the same user from reading the clipboard before it is cleared.
+
+### 4.8 Management window
+
+The management window uses an explicit-save workflow:
+
+- The group list selects the active group and supports create, rename, reorder, and delete.
+- The snippet list supports create, edit, reorder, move to another group, and delete.
+- Creating the first snippet also creates a default group when none exists.
+- Titles, bodies, and group names must be non-empty after trimming. Duplicate snippet titles are allowed.
+- Deleting a snippet requires confirmation.
+- A non-empty group cannot be deleted until its snippets are moved or deleted; TextCaddy never cascades group deletion silently.
+- Navigating away with unsaved edits prompts the user to save, discard, or cancel navigation.
+- Sensitive bodies are masked by default, require an explicit reveal action, and are masked again when the editor loses focus or the management window is hidden.
+- Reordering updates stable sort values in one transaction.
+
+### 4.9 Accessibility
+
+- Every interactive element is reachable by keyboard and has a visible focus indicator.
+- Selection mode and search mode are conveyed by text and accessibility properties, not color alone.
+- Buttons, list items, sensitive-state indicators, and transient messages expose accessible names.
+- The UI follows Windows high-contrast settings and does not require animation to understand state changes.
 
 ## 5. Software architecture
 
@@ -151,13 +193,13 @@ TextCaddy.slnx
 
 #### TextCaddy.App
 
-Owns WPF views, view models, UI resources, application startup, dependency assembly, tray behavior, quick-panel sessions, and management-window navigation.
+Owns WPF views, view models, UI resources, application startup, dependency assembly, tray behavior, quick-panel sessions, management-window navigation, and presentation-specific window lifecycle.
 
 It may depend on Core and Infrastructure. It must not contain SQL, cryptography, raw clipboard access, or Win32 interop beyond UI-specific window hooks delegated to a service.
 
 #### TextCaddy.Core
 
-Owns domain models, use cases, business rules, and service contracts. It has no dependency on WPF, SQLite, Windows Forms, Win32, or concrete infrastructure packages.
+Acts as the application core. It owns domain models, application use cases, business rules, and outbound service ports. Platform-oriented port names may appear here so use cases can request side effects, but Core has no dependency on WPF, SQLite, Windows Forms, Win32, or concrete adapter packages.
 
 Core behavior includes:
 
@@ -211,27 +253,29 @@ Core declares the contracts that isolate side effects:
 - `IGlobalHotkeyService`
 - `IWindowPlacementService`
 - `IForegroundWindowService`
-- `IAppLogger`
 
 Interfaces remain small and use domain-oriented inputs and outputs rather than exposing SQLite, WPF, or Win32 types.
+
+Logging uses `Microsoft.Extensions.Logging` abstractions directly in App and Infrastructure instead of introducing a project-specific logging interface.
 
 ### 5.4 Primary use cases
 
 - `SearchSnippets`
 - `ManageSelection`
 - `ComposeClipboardText`
-- `ShowQuickPanel`
 - `CopySelection`
 - `ClearSensitiveClipboard`
 
 Each use case has one entry point and one clear responsibility. UI event handlers translate user actions into use-case calls and render the returned state.
 
+Opening, positioning, and closing the quick panel remain presentation workflows in `TextCaddy.App`; they are not Core use cases.
+
 ### 5.5 Application startup
 
 ```text
 Process start
-  → acquire the single-instance lock
-  → notify the existing instance and exit when the lock is unavailable
+  → acquire the current-user single-instance lock
+  → notify the existing instance through authenticated local IPC and exit when the lock is unavailable
   → initialize privacy-safe logging
   → create and validate application directories
   → back up and migrate the database
@@ -242,6 +286,33 @@ Process start
 ```
 
 Database or hotkey failure must not produce an unhandled startup crash. The tray remains available whenever the application can safely offer recovery or exit actions.
+
+### 5.6 Threading and Windows runtime model
+
+- The executable entry point and WPF Dispatcher run in a single-threaded apartment.
+- Clipboard, hotkey-message, tray, HWND, focus, and WPF operations execute on the UI Dispatcher thread.
+- `WM_HOTKEY` is received through an `HwndSource` owned and disposed by the App lifecycle.
+- SQLite operations use synchronous `Microsoft.Data.Sqlite` APIs on a serialized background data queue; the UI thread never waits synchronously for database I/O.
+- Results that affect observable UI state are marshaled back to the WPF Dispatcher.
+- Timers and IPC callbacks are cancellable. Shutdown unregisters the hotkey, stops timers and IPC, hides and disposes the tray icon, and then closes database resources.
+- Event subscriptions with application lifetime are explicitly removed during disposal.
+
+### 5.7 Single-instance and IPC model
+
+- A named mutex scoped with the current Windows user SID prevents duplicate instances for that user.
+- A named pipe using the same user scope carries a small versioned command such as `ShowQuickPanel` to the existing process.
+- The pipe accepts only the current user and never accepts arbitrary serialized objects.
+- The second process uses a bounded connection timeout. If the mutex exists but IPC repeatedly fails, it reports that the existing instance is unresponsive instead of starting a competing database writer.
+- Mutex ownership is released automatically on process termination; no persistent lock file is used.
+
+### 5.8 Tray, DPI, and focus adapters
+
+- The MVP uses `System.Windows.Forms.NotifyIcon` in `TextCaddy.App`; Windows Forms is enabled only for that project.
+- The application manifest declares Per-Monitor V2 DPI awareness.
+- Pointer and monitor bounds from Win32 physical coordinates are converted explicitly to WPF device-independent units.
+- The quick panel responds to DPI changes and recalculates placement before becoming visible.
+- Focus restoration validates that the recorded HWND still exists, is visible, and is not owned by TextCaddy.
+- TextCaddy checks the result of foreground activation. If Windows denies activation, it does not simulate input or loop aggressively; it leaves the copied content intact and uses a non-invasive attention signal when appropriate.
 
 ## 6. Domain model
 
@@ -256,6 +327,8 @@ Database or hotkey failure must not produce an unhandled startup crash. The tray
 - `CreatedAtUtc` and `UpdatedAtUtc`: audit metadata.
 
 Sensitive titles are not encrypted in the MVP. The UI warns users not to place secrets in titles.
+
+Ordinary titles and bodies participate in incremental search. Sensitive entries participate by title only; repositories and search use cases must not decrypt every sensitive body to answer a query.
 
 ### 6.2 SnippetGroup
 
@@ -277,6 +350,7 @@ Sensitive titles are not encrypted in the MVP. The UI warns users not to place s
 An in-memory object containing:
 
 - current query;
+- current input mode (`Selection` or `Search`);
 - current page;
 - highlighted snippet identifier;
 - ordered selected snippet identifiers;
@@ -325,11 +399,13 @@ textcaddy/
 │  │  ├─ Selection/
 │  │  └─ Composition/
 │  └─ TextCaddy.Infrastructure/
+│     ├─ Data/Execution/
 │     ├─ Data/Migrations/
 │     ├─ Data/Repositories/
 │     ├─ Security/
 │     ├─ Clipboard/
 │     ├─ Hotkeys/
+│     ├─ SingleInstance/
 │     ├─ Windows/
 │     └─ Logging/
 ├─ tests/
@@ -389,13 +465,18 @@ The database owns:
 
 Sensitive snippet bodies are stored as protected binary values. Ordinary bodies remain searchable plaintext. Repository implementations return domain objects and hide storage representation.
 
+Database invariants include foreign keys between snippets and groups, unique stable identifiers, non-null trimmed titles and names, and explicit sort-order indexes. `PRAGMA foreign_keys = ON` is applied to every connection. WAL mode and a bounded busy timeout are configured during database initialization.
+
+Database work is serialized through the Infrastructure data queue. The implementation uses synchronous SQLite calls on that queue because SQLite does not provide true asynchronous I/O; repository APIs may return tasks to callers without running database calls on the UI thread.
+
 ### 7.5 Migration and backup policy
 
 - Migrations are monotonic and transactional where SQLite permits.
-- Before a schema migration, TextCaddy creates a timestamped database backup.
+- Before a schema migration, TextCaddy opens the database in the startup migration phase and creates a consistent timestamped backup through `SqliteConnection.BackupDatabase`; no normal repository writer is active yet.
 - The application retains the five newest automatic migration backups.
-- A failed migration leaves the original database and backup intact.
+- A migration operates on the original only after the backup succeeds. A failed migration rolls back its transaction where possible, stops normal startup, and preserves the pre-migration backup.
 - Destructive downgrade migrations are not supported.
+- Automatic backups containing DPAPI-protected bodies are recoverable only under the same Windows user profile. They are disaster-recovery copies, not portable exports.
 
 ## 8. Security and privacy
 
@@ -404,19 +485,20 @@ Sensitive snippet bodies are stored as protected binary values. Ordinary bodies 
 - No telemetry.
 - No cloud service or account.
 - No clipboard-history monitoring.
+- Sensitive clipboard writes are marked as ineligible for Windows clipboard history and cross-device roaming.
 - No user snippet content in logs.
 - No search query content in logs.
 - No sensitive values in exception messages written to disk.
 
 ### 8.2 Sensitive storage
 
-Sensitive snippet bodies are protected with Windows DPAPI in current-user scope. This protects a copied database from straightforward offline inspection but does not protect against malicious software already executing as the same Windows user.
+Sensitive snippet bodies are protected with Windows DPAPI in current-user scope. This protects a copied database from straightforward offline inspection but does not protect against software already executing as the same Windows user. DPAPI ciphertext and its automatic backups are tied to the Windows user profile and are not a portable recovery format.
 
 TextCaddy must continue to state that it is not a password manager.
 
 ### 8.3 Memory handling
 
-- Sensitive bodies are decrypted only when needed for display, search, editing, or copying.
+- Sensitive bodies are decrypted only when needed for explicit display, editing, or copying. Incremental search never decrypts them.
 - View models do not retain decrypted sensitive content longer than the active operation requires.
 - Sensitive content is masked by default in list and detail views.
 - The design does not claim guaranteed secure memory erasure under managed .NET runtime behavior.
@@ -430,88 +512,123 @@ Logs may include timestamps, operation categories, exception types, and sanitize
 - **Hotkey conflict:** keep the tray application running, notify the user, and offer settings or exit.
 - **Clipboard contention:** perform a small bounded retry; on failure keep the panel open and show a non-blocking error.
 - **Database creation failure:** keep the original error context in a sanitized log and present the affected path.
-- **Database corruption or write failure:** do not overwrite the original file; enter a safe read-only state when possible and expose the backup location.
+- **Database corruption:** stop normal startup, preserve the original file, and present recovery guidance plus the backup directory. Do not pretend a corrupt database is safely readable.
+- **Database write failure with readable data:** keep existing snippets available for copying, disable editing, label the session as read-only, and expose the data and backup paths.
 - **Migration failure:** preserve the original database and its pre-migration backup; do not continue with a partially migrated schema.
 - **Second process:** signal the existing process to show its panel, then exit.
 - **Unhandled UI error:** show a safe recovery message and write a content-free diagnostic record.
-- **Focus restoration failure:** close the panel safely and leave clipboard behavior intact; never simulate arbitrary input to regain focus.
+- **Focus restoration failure:** close the panel safely and leave clipboard behavior intact; never simulate arbitrary input to regain focus. Report failure only through a non-invasive attention signal or later diagnostic surface.
 
-## 10. Testing strategy
+## 10. Performance and quality targets
 
-### 10.1 Core tests
+Performance is part of the product behavior, not a later optimization. Release measurements use a documented Windows 11 x64 reference machine and a library containing 10,000 ordinary snippets distributed across groups.
+
+- Warm global-shortcut invocation to an interactive panel targets a 95th-percentile latency of 150 ms or less.
+- Updating visible search results after an input change targets 50 ms or less.
+- No UI-thread operation should block input for more than 100 ms during ordinary use.
+- Database writes and backup work never run synchronously on the UI thread.
+- Performance measurements are recorded in release notes or test artifacts so regressions can be compared on the same reference environment.
+
+Accessibility acceptance includes complete keyboard operation, visible focus, text exposure of the current input mode, usable Windows high-contrast rendering, and accessible names for interactive controls.
+
+## 11. Testing strategy
+
+### 11.1 Core tests
 
 - Title and body search.
 - Case-insensitive matching.
+- Sensitive-title search without sensitive-body decryption.
 - Stable ordering and page boundaries.
 - `1` through `9` and `0` item mapping.
+- Selection-mode and search-mode transitions, including numeric search input.
 - Selection, deselection, reselection, and retained order.
 - Selection persistence across search and page changes.
 - Default and custom separator composition.
 - Empty-selection fallback to the highlighted item.
 - Validation of groups, snippets, and settings.
 
-### 10.2 Infrastructure tests
+### 11.2 Infrastructure tests
 
 - Database creation and schema migration using disposable directories.
 - Ordinary and sensitive snippet round trips.
 - DPAPI protect/unprotect behavior under the current Windows user.
 - Settings persistence.
 - Backup retention and failed-migration preservation.
-- Clipboard fingerprint comparison logic without destructive interaction with unrelated clipboard content.
+- Sensitive clipboard options disable history and roaming.
+- Clipboard sequence comparison does not clear content after any later clipboard change, including an identical-text copy.
+- Per-user single-instance naming and bounded IPC behavior.
 
-### 10.3 App tests
+### 11.3 App tests
 
 - Quick-panel view-model state transitions.
 - Toggle, cancel, copy-and-close, and copy-and-stay-open orchestration.
 - Empty-result and transient-message behavior.
 - Hotkey-registration failure state.
+- Hotkey replacement preserves the previous registration when the candidate conflicts.
 - Startup decisions that can be isolated from the actual desktop.
+- Management-window unsaved-change, deletion, and non-empty-group rules.
 
-### 10.4 Manual Windows smoke tests
+### 11.4 Manual Windows smoke tests
 
 - Global shortcut registration and conflict handling.
 - Single-instance activation.
 - Pointer-adjacent placement on every connected monitor.
 - Mixed-DPI monitor transitions.
 - Work-area clamping near every screen edge.
-- Keyboard focus on open.
+- Selection-mode keyboard focus on open, followed by explicit search-field focus after `/` or `Ctrl+F`.
 - Destination focus restoration on close.
 - Tray lifecycle and clean exit.
 - Clipboard contention behavior.
+- Sensitive values do not appear in Windows clipboard history and are not marked roamable.
+- Search-mode IME input, numeric queries, and caret movement.
+- Screen-reader names, keyboard focus visibility, and Windows high-contrast rendering.
 
-### 10.5 Continuous integration
+### 11.5 Continuous integration
 
-GitHub Actions runs on a Windows runner for every pull request and performs package restore, build, and automated tests. Automatic installer publication is outside the first implementation slice.
+GitHub Actions runs on a Windows runner for every pull request and performs package restore, build, and non-interactive automated tests. Tests that require an interactive desktop, real global hotkeys, foreground activation, a visible tray, or the system clipboard are explicitly categorized and excluded from hosted CI; they run in the documented local smoke suite or a future interactive self-hosted runner. Automatic installer publication is outside the first implementation slice.
 
-## 11. First implementation slice
+## 12. First implementation slice
 
-The first vertical slice establishes the product skeleton without premature snippet management features:
+The first vertical slice proves the smallest complete product loop. It deliberately supports only ordinary snippets in one automatically created default group; search, sensitive storage, custom separators, and full group management follow in later slices.
 
-1. Create the solution, projects, centralized build properties, and tests.
-2. Implement dependency assembly and application startup.
-3. Enforce a single running instance.
-4. Create the tray icon and exit command.
-5. Register `Ctrl+Alt+Space` through an isolated hotkey service.
-6. Display an empty quick panel near the pointer.
-7. Clamp the panel to the current monitor work area.
-8. Toggle the panel with the shortcut and close it with `Esc`.
-9. Restore the previously active window when closing.
-10. Add CI for restore, build, and tests.
+1. Create the solution, projects, centralized build properties, and core tests.
+2. Create the initial SQLite schema and automatically create one default group.
+3. Add a minimal management window that can create, edit, list, and delete ordinary snippets in that group.
+4. Implement dependency assembly, STA application startup, a current-user single instance, a tray icon, and clean exit.
+5. Register `Ctrl+Alt+Space` with `MOD_NOREPEAT` through the hotkey adapter.
+6. Open a quick panel near the pointer and load the first ten persisted snippets from the default group.
+7. Support digit-based multi-selection, visible selection order, and newline composition.
+8. Implement `Ctrl+C` copy-and-close, `Ctrl+Shift+C` copy-and-stay-open, `Esc` cancellation, and destination-focus restoration.
+9. Clamp the panel to the current Per-Monitor V2 work area.
+10. Add Windows CI for restore, build, and automated tests.
 
-### 11.1 Acceptance criteria
+### 12.1 Acceptance criteria
 
 - `dotnet build` completes without errors.
 - All automated tests pass.
 - The application is single-instance and remains available through the system tray.
+- A snippet created in the management window remains available after an application restart.
 - `Ctrl+Alt+Space` opens and closes the quick panel.
+- The quick panel displays persisted snippets from the default group rather than an empty shell.
+- Digits select and deselect visible entries, and the UI exposes their composition order.
+- `Ctrl+C` places the exact newline-composed result on the clipboard and closes the panel.
+- `Ctrl+Shift+C` places the same result on the clipboard and keeps the panel open.
 - `Esc` closes the quick panel.
 - The panel remains inside the current monitor's work area.
 - Closing restores focus to the previous application where Windows permits it.
 - A hotkey conflict does not crash the application and the tray exit command remains available.
 - Logs contain no user snippet or clipboard content.
+- The end-to-end loop from saving a snippet to copying it from the quick panel passes a documented manual smoke test.
 - README development status remains truthful.
 
-## 12. Deferred decisions
+### 12.2 Subsequent slices
+
+1. **Search and navigation:** explicit selection/search modes, IME and numeric queries, paging, performance measurements, and retained selection summaries.
+2. **Organization:** full group management, moving and reordering snippets, settings persistence, and configurable separators.
+3. **Sensitive content:** DPAPI persistence, masking, title-only search, history/roaming exclusion, sequence-based timed clearing, and security tests.
+4. **Recovery and polish:** migration backups, read-only failure mode, accessibility verification, diagnostics, packaging, and release documentation.
+
+## 13. Deferred decisions
 
 The following decisions are intentionally deferred until their implementation slice:
 
