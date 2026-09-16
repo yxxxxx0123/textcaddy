@@ -1,8 +1,11 @@
 # TextCaddy MVP Design
 
-**Date:** 2026-09-16  
-**Status:** Approved in conversation; awaiting final document review  
-**Target:** Windows 11 x64  
+**Date:** 2026-09-16
+
+**Status:** Approved in conversation; awaiting final document review
+
+**Target:** Windows 11 x64
+
 **Technology:** C#, .NET 10, WPF
 
 ## 1. Product summary
